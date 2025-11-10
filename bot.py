@@ -11,6 +11,7 @@ import os
 import asyncio
 from datetime import datetime
 from typing import Optional
+import pytz
 
 from database import Database, make_class_key, parse_class_key
 from monitor import UCLAClassMonitor
@@ -26,6 +27,45 @@ db = Database()
 
 # Term configuration (update this as needed)
 CURRENT_TERM = os.environ.get('UCLA_TERM', '26W')
+
+# Timezone configuration
+PACIFIC = pytz.timezone('America/Los_Angeles')
+
+
+def to_pacific_time(dt_input) -> str:
+    """
+    Convert datetime to Pacific Time formatted string.
+
+    Args:
+        dt_input: Can be datetime object, ISO string, or None
+
+    Returns:
+        Formatted string like "Nov 10, 2025 9:34 AM PST"
+    """
+    if dt_input is None:
+        dt_input = datetime.now()
+
+    # Handle string input (ISO format from database)
+    if isinstance(dt_input, str):
+        try:
+            dt_input = datetime.fromisoformat(dt_input.replace('Z', '+00:00'))
+        except:
+            return dt_input  # Return as-is if parsing fails
+
+    # Convert to Pacific Time
+    if dt_input.tzinfo is None:
+        # Assume UTC if no timezone info
+        dt_input = pytz.utc.localize(dt_input)
+
+    dt_pacific = dt_input.astimezone(PACIFIC)
+
+    # Format: "Nov 10, 2025 9:34 AM PST"
+    return dt_pacific.strftime("%b %d, %Y %I:%M %p %Z")
+
+
+def now_pacific() -> datetime:
+    """Get current time in Pacific timezone."""
+    return datetime.now(PACIFIC)
 
 
 @bot.event
@@ -92,7 +132,7 @@ async def check_class(interaction: discord.Interaction, subject: str, course: st
             title=f"📚 {subject} {course}",
             description=f"**Status:** {status}",
             color=color,
-            timestamp=datetime.now()
+            timestamp=now_pacific()
         )
 
         # Add enrollment info
@@ -113,10 +153,11 @@ async def check_class(interaction: discord.Interaction, subject: str, course: st
 
         # Check if user is subscribed
         user_subs = db.get_user_subscriptions(str(interaction.user.id))
+        checked_time = to_pacific_time(None)
         if class_key in user_subs:
-            embed.set_footer(text="🔔 You're subscribed to this class")
+            embed.set_footer(text=f"🔔 You're subscribed • Checked {checked_time}")
         else:
-            embed.set_footer(text="Use /subscribe to get notified when this class opens")
+            embed.set_footer(text=f"Use /subscribe to get notified • Checked {checked_time}")
 
         await interaction.followup.send(embed=embed)
 
@@ -166,6 +207,7 @@ async def subscribe(interaction: discord.Interaction, subject: str, course: str)
             print(f"Error fetching class data during subscribe: {e}")
 
         # Create or update class entry in database
+        check_time = to_pacific_time(None)
         if class_data:
             # We got real data!
             db.update_class_state(class_key, class_data)
@@ -175,6 +217,7 @@ async def subscribe(interaction: discord.Interaction, subject: str, course: str)
             status_text = f"**{status}**"
             if capacity > 0:
                 status_text += f" ({enrolled}/{capacity})"
+            status_text += f" as of {check_time}"
         else:
             # Couldn't fetch data, create placeholder
             placeholder_data = {
@@ -281,7 +324,7 @@ async def list_subscriptions(interaction: discord.Interaction):
         title="📚 Your Subscribed Classes",
         description=f"You're monitoring **{len(user_subs)}** class(es)",
         color=0x2b7de9,
-        timestamp=datetime.now()
+        timestamp=now_pacific()
     )
 
     for class_key in user_subs:
@@ -292,6 +335,7 @@ async def list_subscriptions(interaction: discord.Interaction):
             status = class_state['status']
             enrolled = class_state['enrolled']
             capacity = class_state['capacity']
+            last_checked = to_pacific_time(class_state.get('last_checked'))
 
             status_emoji = {
                 'Open': '✅',
@@ -302,7 +346,7 @@ async def list_subscriptions(interaction: discord.Interaction):
 
             embed.add_field(
                 name=f"{status_emoji} {subject} {course}",
-                value=f"Status: **{status}**\nEnrollment: {enrolled}/{capacity}",
+                value=f"Status: **{status}**\nEnrollment: {enrolled}/{capacity}\nLast checked: {last_checked}",
                 inline=False
             )
         else:
@@ -336,7 +380,7 @@ async def check_all_status(interaction: discord.Interaction):
         title="📊 Current Class Status",
         description=f"Checking {len(user_subs)} class(es)...",
         color=0x2b7de9,
-        timestamp=datetime.now()
+        timestamp=now_pacific()
     )
 
     for class_key in user_subs:
@@ -347,7 +391,7 @@ async def check_all_status(interaction: discord.Interaction):
             status = class_state['status']
             enrolled = class_state['enrolled']
             capacity = class_state['capacity']
-            last_checked = class_state.get('last_checked', 'Unknown')
+            last_checked = to_pacific_time(class_state.get('last_checked'))
 
             status_emoji = {
                 'Open': '✅',
@@ -358,7 +402,7 @@ async def check_all_status(interaction: discord.Interaction):
 
             embed.add_field(
                 name=f"{status_emoji} {subject} {course}",
-                value=f"**{status}** - {enrolled}/{capacity}\n*Last checked: {last_checked[:16]}*",
+                value=f"**{status}** - {enrolled}/{capacity}\n*Last checked: {last_checked}*",
                 inline=False
             )
         else:
@@ -368,18 +412,18 @@ async def check_all_status(interaction: discord.Interaction):
                 inline=False
             )
 
-    embed.set_footer(text="Classes are checked every 5 minutes by GitHub Actions")
+    embed.set_footer(text="Classes are checked hourly at :35 (UCLA updates at :34)")
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ==================== Background Tasks ====================
 
-@tasks.loop(minutes=5)
+@tasks.loop(minutes=60)
 async def check_class_changes():
     """
     Background task to check for class status changes and notify users.
-    Runs every 5 minutes in sync with GitHub Actions.
+    Runs every hour, checking database after GitHub Actions updates (at :35).
     """
     try:
         # Get all classes that recently changed status
@@ -398,11 +442,12 @@ async def check_class_changes():
                     subject, course = parse_class_key(class_key)
 
                     # Create notification embed
+                    notification_time = to_pacific_time(None)
                     embed = discord.Embed(
                         title=f"🎉 Class Available: {subject} {course}",
                         description=f"**Status:** {current_status}",
                         color=0x00ff00,
-                        timestamp=datetime.now()
+                        timestamp=now_pacific()
                     )
 
                     if class_state['capacity'] > 0:
@@ -412,7 +457,7 @@ async def check_class_changes():
                             inline=True
                         )
 
-                    embed.set_footer(text="Act fast! Enroll before spots fill up.")
+                    embed.set_footer(text=f"Act fast! Detected at {notification_time}")
 
                     # Notify each subscriber
                     for user_id in subscribers:
