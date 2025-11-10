@@ -152,6 +152,22 @@ async def subscribe(interaction: discord.Interaction, subject: str, course: str)
         )
         return
 
+    # Ensure class exists in database (create placeholder if needed)
+    class_state = db.get_class_state(class_key)
+    if not class_state:
+        # Create placeholder entry - will be updated by GitHub Actions
+        placeholder_data = {
+            'subject': subject,
+            'catalog_number': course,
+            'status': 'Unknown',
+            'enrolled': 0,
+            'capacity': 0,
+            'waitlist_count': 0,
+            'waitlist_capacity': 0,
+            'last_checked': datetime.now().isoformat()
+        }
+        db.update_class_state(class_key, placeholder_data)
+
     # Add subscription
     success = db.add_subscription(user_id, class_key)
 
