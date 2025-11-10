@@ -12,6 +12,7 @@ import requests
 from datetime import datetime
 from typing import Dict, List, Optional
 from playwright.async_api import async_playwright, Browser, Page
+from database import Database
 
 
 class UCLAClassMonitor:
@@ -19,11 +20,10 @@ class UCLAClassMonitor:
 
     BASE_URL = "https://sa.ucla.edu/ro/public/soc/Results"
 
-    def __init__(self, config_path: str = "config.json", state_path: str = "state.json"):
-        """Initialize the monitor with config and state files."""
+    def __init__(self, config_path: str = "config.json"):
+        """Initialize the monitor with config file and Supabase database."""
         self.config = self._load_json(config_path)
-        self.state_path = state_path
-        self.state = self._load_json(state_path, default={})
+        self.db = Database()
 
     def _load_json(self, path: str, default: dict = None) -> dict:
         """Load JSON file, return default if it doesn't exist."""
@@ -32,11 +32,6 @@ class UCLAClassMonitor:
                 return json.load(f)
         except FileNotFoundError:
             return default if default is not None else {}
-
-    def _save_state(self):
-        """Save current state to file."""
-        with open(self.state_path, 'w') as f:
-            json.dump(self.state, f, indent=2)
 
     def build_class_url(self, subject: str, term: str) -> str:
         """
@@ -204,6 +199,7 @@ class UCLAClassMonitor:
     def send_discord_notification(self, class_data: Dict, previous_status: str):
         """
         Send Discord webhook notification about class status change.
+        Note: This is now primarily handled by the Discord bot, but kept for backward compatibility.
 
         Args:
             class_data: Current class data
@@ -212,7 +208,7 @@ class UCLAClassMonitor:
         webhook_url = os.environ.get('DISCORD_WEBHOOK_URL')
 
         if not webhook_url:
-            print("  Warning: DISCORD_WEBHOOK_URL not set, skipping notification")
+            print("  Note: DISCORD_WEBHOOK_URL not set, Discord bot will handle notifications")
             return
 
         subject = class_data['subject']
@@ -272,13 +268,32 @@ class UCLAClassMonitor:
         try:
             response = requests.post(webhook_url, json=payload, timeout=10)
             response.raise_for_status()
-            print(f"  ✓ Discord notification sent for {subject} {catalog}")
+            print(f"  ✓ Discord webhook notification sent for {subject} {catalog}")
         except requests.RequestException as e:
-            print(f"  Error sending Discord notification: {e}")
+            print(f"  Error sending Discord webhook notification: {e}")
+
+    async def get_browser(self):
+        """
+        Get a Playwright browser and page instance.
+        Use with async context manager for proper cleanup.
+
+        Example:
+            async with monitor.get_browser() as (browser, page):
+                data = await monitor.scrape_class_data(page, "PSYCH", "124G", "26W")
+        """
+        p = await async_playwright().start()
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+
+        try:
+            yield (browser, page)
+        finally:
+            await browser.close()
+            await p.stop()
 
     async def check_classes(self):
         """Check all configured classes for availability changes using Playwright."""
-        term = self.config.get('term', '25S')
+        term = self.config.get('term', '26W')
         classes = self.config.get('classes', [])
 
         if not classes:
@@ -313,25 +328,28 @@ class UCLAClassMonitor:
                 current_status = class_data['status']
                 print(f"  Status: {current_status} ({class_data['enrolled']}/{class_data['capacity']})")
 
-                # Check if status changed
-                previous_data = self.state.get(class_key, {})
-                previous_status = previous_data.get('status')
+                # Get previous state from Supabase
+                previous_data = self.db.get_class_state(class_key)
+                previous_status = previous_data.get('status') if previous_data else None
 
                 if previous_status and previous_status != current_status:
                     print(f"  🔔 Status changed: {previous_status} → {current_status}")
                     self.send_discord_notification(class_data, previous_status)
+                    print(f"  💾 Status change saved to database - Discord bot will notify subscribers")
                 elif not previous_status:
-                    print(f"  ℹ First check, establishing baseline")
+                    print(f"  ℹ First check, establishing baseline in database")
                 else:
                     print(f"  No change")
 
-                # Update state
-                self.state[class_key] = class_data
+                # Update state in Supabase
+                success = self.db.update_class_state(class_key, class_data)
+                if success:
+                    print(f"  ✓ Updated database")
+                else:
+                    print(f"  ✗ Failed to update database")
 
             await browser.close()
 
-        # Save updated state
-        self._save_state()
         print(f"\n✓ Check complete at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
