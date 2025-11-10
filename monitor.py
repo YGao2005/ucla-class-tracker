@@ -292,30 +292,33 @@ class UCLAClassMonitor:
             await p.stop()
 
     async def check_classes(self):
-        """Check all configured classes for availability changes using Playwright."""
+        """Check all subscribed classes for availability changes using Playwright."""
         term = self.config.get('term', '26W')
-        classes = self.config.get('classes', [])
+
+        # Get classes from database (all classes with at least one subscription)
+        classes = self.db.get_subscribed_classes()
 
         if not classes:
-            print("No classes configured to monitor")
+            print("No classes with subscriptions to monitor")
+            print("Tip: Use the Discord bot's /subscribe command to add classes")
             return
 
-        print(f"Checking {len(classes)} classes for term {term}...")
+        print(f"Checking {len(classes)} subscribed class(es) for term {term}...")
 
         async with async_playwright() as p:
             # Launch browser in headless mode
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
 
-            for class_config in classes:
-                subject = class_config.get('subject')
-                catalog_number = class_config.get('catalog_number')
+            for class_info in classes:
+                subject = class_info.get('subject')
+                catalog_number = class_info.get('catalog_number')
+                class_key = class_info.get('class_key')
 
                 if not subject or not catalog_number:
-                    print(f"Skipping invalid class config: {class_config}")
+                    print(f"Skipping invalid class: {class_info}")
                     continue
 
-                class_key = f"{subject}_{catalog_number}"
                 print(f"\nChecking {subject} {catalog_number}...")
 
                 # Scrape current class data

@@ -107,6 +107,40 @@ class Database:
             print(f"Error getting all class states: {e}")
             return []
 
+    def get_subscribed_classes(self) -> List[Dict]:
+        """
+        Get all classes that have at least one subscription.
+
+        Returns:
+            List of dictionaries with 'subject' and 'catalog_number' keys
+        """
+        try:
+            # Get distinct class_keys from user_subscriptions
+            response = self.client.table('user_subscriptions')\
+                .select('class_key')\
+                .execute()
+
+            if not response.data:
+                return []
+
+            # Get unique class keys
+            class_keys = list(set(sub['class_key'] for sub in response.data))
+
+            # Parse into subject and catalog_number
+            classes = []
+            for class_key in class_keys:
+                subject, catalog_number = parse_class_key(class_key)
+                classes.append({
+                    'subject': subject,
+                    'catalog_number': catalog_number,
+                    'class_key': class_key
+                })
+
+            return classes
+        except Exception as e:
+            print(f"Error getting subscribed classes: {e}")
+            return []
+
     def get_classes_by_status(self, status: str) -> List[Dict]:
         """
         Get all classes with a specific status.
