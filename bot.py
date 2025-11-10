@@ -143,55 +143,86 @@ async def subscribe(interaction: discord.Interaction, subject: str, course: str)
     class_key = make_class_key(subject, course)
     user_id = str(interaction.user.id)
 
-    # Check if already subscribed
-    user_subs = db.get_user_subscriptions(user_id)
-    if class_key in user_subs:
-        await interaction.response.send_message(
-            f"ℹ️ You're already subscribed to {subject} {course}!",
-            ephemeral=True
-        )
-        return
+    # Defer response to show "thinking" state while we fetch data
+    await interaction.response.defer(ephemeral=True)
 
-    # Ensure class exists in database (create placeholder if needed)
-    class_state = db.get_class_state(class_key)
-    if not class_state:
-        # Create placeholder entry - will be updated by GitHub Actions
-        placeholder_data = {
-            'subject': subject,
-            'catalog_number': course,
-            'status': 'Unknown',
-            'enrolled': 0,
-            'capacity': 0,
-            'waitlist_count': 0,
-            'waitlist_capacity': 0,
-            'last_checked': datetime.now().isoformat()
-        }
-        db.update_class_state(class_key, placeholder_data)
+    try:
+        # Check if already subscribed
+        user_subs = db.get_user_subscriptions(user_id)
+        if class_key in user_subs:
+            await interaction.followup.send(
+                f"ℹ️ You're already subscribed to {subject} {course}!",
+                ephemeral=True
+            )
+            return
 
-    # Add subscription
-    success = db.add_subscription(user_id, class_key)
-
-    if success:
-        # Try to DM user to confirm
+        # Try to fetch real data immediately
+        class_data = None
         try:
-            await interaction.user.send(
-                f"✅ You're now subscribed to **{subject} {course}**!\n"
-                f"I'll send you a DM when this class has open spots.\n\n"
-                f"*Use `/unsubscribe {subject} {course}` to stop notifications.*"
-            )
-            await interaction.response.send_message(
-                f"✅ Subscribed to {subject} {course}! Check your DMs.",
+            monitor = UCLAClassMonitor()
+            async with monitor.get_browser() as (browser, page):
+                class_data = await monitor.scrape_class_data(page, subject, course, CURRENT_TERM)
+        except Exception as e:
+            print(f"Error fetching class data during subscribe: {e}")
+
+        # Create or update class entry in database
+        if class_data:
+            # We got real data!
+            db.update_class_state(class_key, class_data)
+            status = class_data['status']
+            enrolled = class_data['enrolled']
+            capacity = class_data['capacity']
+            status_text = f"**{status}**"
+            if capacity > 0:
+                status_text += f" ({enrolled}/{capacity})"
+        else:
+            # Couldn't fetch data, create placeholder
+            placeholder_data = {
+                'subject': subject,
+                'catalog_number': course,
+                'status': 'Unknown',
+                'enrolled': 0,
+                'capacity': 0,
+                'waitlist_count': 0,
+                'waitlist_capacity': 0,
+                'last_checked': datetime.now().isoformat()
+            }
+            db.update_class_state(class_key, placeholder_data)
+            status_text = "**Unknown** (will check in next update)"
+
+        # Add subscription
+        success = db.add_subscription(user_id, class_key)
+
+        if success:
+            # Send confirmation message with current status
+            await interaction.followup.send(
+                f"✅ Subscribed to **{subject} {course}**!\n"
+                f"📊 Current status: {status_text}\n\n"
+                f"I'll send you a DM when this class has open spots.\n"
+                f"*Use `/unsubscribe {subject} {course}` to stop notifications.*",
                 ephemeral=True
             )
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                f"✅ Subscribed to {subject} {course}!\n"
-                f"⚠️ I couldn't DM you. Please enable DMs from server members to receive notifications.",
+
+            # Try to DM user as well
+            try:
+                await interaction.user.send(
+                    f"✅ You're now subscribed to **{subject} {course}**!\n"
+                    f"📊 Current status: {status_text}\n\n"
+                    f"I'll send you a DM when this class has open spots."
+                )
+            except discord.Forbidden:
+                # User has DMs disabled, that's okay - we already showed them the message
+                pass
+        else:
+            await interaction.followup.send(
+                f"❌ Failed to subscribe to {subject} {course}. Please try again.",
                 ephemeral=True
             )
-    else:
-        await interaction.response.send_message(
-            f"❌ Failed to subscribe to {subject} {course}. Please try again.",
+
+    except Exception as e:
+        print(f"Error in subscribe command: {e}")
+        await interaction.followup.send(
+            f"❌ An error occurred while subscribing. Please try again.",
             ephemeral=True
         )
 
