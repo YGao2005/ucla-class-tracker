@@ -1,8 +1,8 @@
 """
-Discord Internship Tracker Bot
-- Posts daily internship announcements
-- Tracks user applications
-- Provides statistics and search functionality
+Discord Internship Tracker Bot - Version 2 with Improved UX
+- Compact list views with select menus
+- Smart filtering (unapplied jobs only)
+- New commands: /today, /recent
 """
 
 import discord
@@ -46,17 +46,14 @@ class InternshipBot(commands.Bot):
     async def check_new_internships(self):
         """Check for new internships every hour and post them"""
         try:
-            # Skip if no channel configured
             if self.announcement_channel_id == 0:
                 return
 
-            # Get channel
             channel = self.get_channel(self.announcement_channel_id)
             if not channel:
                 print(f"⚠ Warning: Could not find channel {self.announcement_channel_id}")
                 return
 
-            # Find new internships (not yet posted)
             new_jobs = await self.get_unposted_jobs()
 
             if not new_jobs:
@@ -64,18 +61,13 @@ class InternshipBot(commands.Bot):
 
             print(f"📢 Found {len(new_jobs)} new internships to announce")
 
-            # Post each job with buttons
             for job in new_jobs:
                 try:
                     embed = self.create_job_embed(job)
                     view = JobActionView(self.supabase, job['id'])
 
                     message = await channel.send(embed=embed, view=view)
-
-                    # Mark as posted
                     await self.mark_job_as_posted(job['id'], str(channel.id), str(message.id))
-
-                    # Rate limiting: wait between posts
                     await asyncio.sleep(2)
 
                 except Exception as e:
@@ -94,17 +86,14 @@ class InternshipBot(commands.Bot):
     async def get_unposted_jobs(self, limit: int = 30) -> List[Dict]:
         """Get jobs that haven't been posted to Discord yet"""
         try:
-            # Get jobs from last 7 days
             week_ago = (datetime.now() - timedelta(days=7)).date().isoformat()
 
-            # Query for unposted jobs
             response = self.supabase.table('intern_jobs').select('*').gte(
                 'scraped_date', week_ago
             ).order('scraped_date', desc=True).limit(limit).execute()
 
             all_jobs = response.data
 
-            # Filter out already posted jobs
             unposted_jobs = []
             for job in all_jobs:
                 posted_response = self.supabase.table('intern_posted_jobs').select(
@@ -133,7 +122,6 @@ class InternshipBot(commands.Bot):
 
     def create_job_embed(self, job: Dict) -> discord.Embed:
         """Create a rich embed for a job posting"""
-        # Color based on relevance score
         score = job.get('relevance_score', 0)
         if score >= 15:
             color = discord.Color.green()
@@ -152,7 +140,6 @@ class InternshipBot(commands.Bot):
 
         embed.set_author(name=job['company'])
 
-        # Add fields
         if job.get('location'):
             embed.add_field(name="📍 Location", value=job['location'], inline=True)
 
@@ -165,13 +152,7 @@ class InternshipBot(commands.Bot):
         if job.get('posted_date'):
             embed.add_field(name="📅 Posted", value=job['posted_date'], inline=True)
 
-        # Relevance score
-        embed.add_field(
-            name="⭐ Relevance",
-            value=f"{score}/20",
-            inline=True
-        )
-
+        embed.add_field(name="⭐ Relevance", value=f"{score}/20", inline=True)
         embed.set_footer(text=f"Job ID: {job['id']}")
 
         return embed
@@ -186,12 +167,19 @@ class InternshipBot(commands.Bot):
 
         return description[:max_length] + "..."
 
+    def create_compact_job_text(self, job: Dict, index: int) -> str:
+        """Create compact one-line job description for lists"""
+        score = job.get('relevance_score', 0)
+        location = job.get('location', 'Not specified')[:20]  # Truncate long locations
+
+        return f"{index}. **{job['title']}** @ {job['company']}\n   📍 {location} • ⭐ {score}/20 • [Apply]({job['url']})"
+
 
 class JobActionView(discord.ui.View):
-    """Interactive buttons for job postings"""
+    """Interactive buttons for individual job postings (for auto-announcements)"""
 
     def __init__(self, supabase_client: Client, job_id: str):
-        super().__init__(timeout=None)  # Persistent view
+        super().__init__(timeout=None)
         self.supabase = supabase_client
         self.job_id = job_id
 
@@ -245,20 +233,221 @@ class JobActionView(discord.ui.View):
             print(f"✗ Error ensuring user exists: {e}")
 
 
+class JobSelectView(discord.ui.View):
+    """Select menu for marking multiple jobs as applied"""
+
+    def __init__(self, supabase_client: Client, jobs: List[Dict], user_id: str):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.supabase = supabase_client
+        self.jobs = jobs
+        self.user_id = user_id
+
+        # Create select menu options
+        options = []
+        for i, job in enumerate(jobs[:25], 1):  # Discord max 25 options
+            label = f"{i}. {job['company']}: {job['title']}"[:100]  # Max 100 chars
+            description = f"{job.get('location', 'Remote')}"[:100]
+            options.append(discord.SelectOption(
+                label=label,
+                description=description,
+                value=job['id']
+            ))
+
+        # Add select menu
+        select = discord.ui.Select(
+            placeholder="Select jobs you've applied to...",
+            min_values=1,
+            max_values=len(options),
+            options=options,
+            custom_id="job_select"
+        )
+        select.callback = self.select_callback
+        self.add_item(select)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        """Handle job selection"""
+        try:
+            selected_job_ids = interaction.data['values']
+
+            # Ensure user exists
+            self.supabase.table('intern_users').upsert({
+                'discord_id': self.user_id,
+                'username': interaction.user.name
+            }, on_conflict='discord_id').execute()
+
+            # Check which jobs are already applied
+            existing_response = self.supabase.table('intern_applications').select('job_id').eq(
+                'user_discord_id', self.user_id
+            ).in_('job_id', selected_job_ids).execute()
+
+            existing_ids = {app['job_id'] for app in existing_response.data}
+            new_ids = [jid for jid in selected_job_ids if jid not in existing_ids]
+
+            # Insert new applications
+            if new_ids:
+                applications = [{
+                    'user_discord_id': self.user_id,
+                    'job_id': job_id,
+                    'status': 'applied'
+                } for job_id in new_ids]
+
+                self.supabase.table('intern_applications').insert(applications).execute()
+
+            # Build response
+            response_lines = []
+            if new_ids:
+                response_lines.append(f"✓ Marked **{len(new_ids)}** new application(s)!")
+            if existing_ids:
+                response_lines.append(f"ℹ️ {len(existing_ids)} already marked")
+
+            response_lines.append(f"\n📊 Total applications: {len(existing_ids) + len(new_ids)}")
+            response_lines.append("Use `/stats` to see your progress!")
+
+            await interaction.response.send_message(
+                "\n".join(response_lines),
+                ephemeral=True
+            )
+
+        except Exception as e:
+            await interaction.response.send_message(
+                f"✗ Error: {e}",
+                ephemeral=True
+            )
+
+
 def setup_commands(bot: InternshipBot):
     """Setup slash commands"""
 
-    @bot.tree.command(name="internships", description="View recent internship postings")
-    @app_commands.describe(limit="Number of internships to show (default: 10)")
+    @bot.tree.command(name="internships", description="View top unapplied internships by relevance")
+    @app_commands.describe(limit="Number of internships to show (default: 10, max: 25)")
     async def internships(interaction: discord.Interaction, limit: int = 10):
-        """View recent internships"""
+        """View unapplied internships sorted by relevance"""
         try:
             await interaction.response.defer()
+
+            user_id = str(interaction.user.id)
+            limit = min(limit, 25)
+
+            # Get user's applied job IDs
+            applied_response = bot.supabase.table('intern_applications').select('job_id').eq(
+                'user_discord_id', user_id
+            ).execute()
+
+            applied_ids = {app['job_id'] for app in applied_response.data}
+
+            # Fetch all jobs sorted by relevance
+            response = bot.supabase.table('intern_jobs').select('*').order(
+                'relevance_score', desc=True
+            ).limit(100).execute()  # Get more to filter
+
+            # Filter out applied jobs
+            unapplied_jobs = [job for job in response.data if job['id'] not in applied_ids][:limit]
+
+            if not unapplied_jobs:
+                await interaction.followup.send(
+                    "🎉 You've applied to all available internships!\nCheck back later for new postings."
+                )
+                return
+
+            # Create compact list embed
+            embed = discord.Embed(
+                title="📋 Top Unapplied Internships",
+                description=f"Showing {len(unapplied_jobs)} most relevant internships you haven't applied to yet.",
+                color=discord.Color.blue()
+            )
+
+            # Add jobs as fields
+            job_list = "\n\n".join([
+                bot.create_compact_job_text(job, i)
+                for i, job in enumerate(unapplied_jobs, 1)
+            ])
+
+            # Split into chunks if too long (Discord 4096 char limit)
+            if len(job_list) > 4000:
+                job_list = "\n\n".join([
+                    bot.create_compact_job_text(job, i)
+                    for i, job in enumerate(unapplied_jobs[:10], 1)
+                ])
+                embed.set_footer(text="Showing first 10 results")
+                unapplied_jobs = unapplied_jobs[:10]
+
+            embed.description += f"\n\n{job_list}"
+
+            # Add select menu view
+            view = JobSelectView(bot.supabase, unapplied_jobs, user_id)
+
+            await interaction.followup.send(embed=embed, view=view)
+
+        except Exception as e:
+            await interaction.followup.send(f"✗ Error: {e}")
+
+    @bot.tree.command(name="today", description="View internships posted today")
+    async def today(interaction: discord.Interaction):
+        """View internships posted/scraped today"""
+        try:
+            await interaction.response.defer()
+
+            user_id = str(interaction.user.id)
+            today = datetime.now().date().isoformat()
+
+            # Fetch jobs from today
+            response = bot.supabase.table('intern_jobs').select('*').eq(
+                'scraped_date', today
+            ).order('relevance_score', desc=True).execute()
+
+            jobs = response.data
+
+            if not jobs:
+                await interaction.followup.send(
+                    f"📭 No new internships posted today ({datetime.now().strftime('%B %d, %Y')}).\n"
+                    "Check back tomorrow!"
+                )
+                return
+
+            # Create compact list embed
+            embed = discord.Embed(
+                title=f"📅 Today's Internships ({datetime.now().strftime('%b %d')})",
+                description=f"Found {len(jobs)} new internship(s) today!",
+                color=discord.Color.gold()
+            )
+
+            job_list = "\n\n".join([
+                bot.create_compact_job_text(job, i)
+                for i, job in enumerate(jobs[:25], 1)  # Max 25 for select menu
+            ])
+
+            if len(job_list) > 4000:
+                job_list = "\n\n".join([
+                    bot.create_compact_job_text(job, i)
+                    for i, job in enumerate(jobs[:10], 1)
+                ])
+                embed.set_footer(text="Showing first 10 results")
+                jobs = jobs[:10]
+
+            embed.description += f"\n\n{job_list}"
+
+            # Add select menu
+            view = JobSelectView(bot.supabase, jobs, user_id)
+
+            await interaction.followup.send(embed=embed, view=view)
+
+        except Exception as e:
+            await interaction.followup.send(f"✗ Error: {e}")
+
+    @bot.tree.command(name="recent", description="View most recent internships")
+    @app_commands.describe(count="Number of internships to show (default: 10, max: 25)")
+    async def recent(interaction: discord.Interaction, count: int = 10):
+        """View most recent internships"""
+        try:
+            await interaction.response.defer()
+
+            user_id = str(interaction.user.id)
+            count = min(count, 25)
 
             # Fetch recent jobs
             response = bot.supabase.table('intern_jobs').select('*').order(
                 'scraped_date', desc=True
-            ).limit(min(limit, 25)).execute()
+            ).limit(count).execute()
 
             jobs = response.data
 
@@ -266,13 +455,24 @@ def setup_commands(bot: InternshipBot):
                 await interaction.followup.send("No internships found.")
                 return
 
-            # Create embeds (max 10 per message)
-            embeds = [bot.create_job_embed(job) for job in jobs[:10]]
-
-            await interaction.followup.send(
-                f"**Latest {len(embeds)} Internships:**",
-                embeds=embeds
+            # Create compact list embed
+            embed = discord.Embed(
+                title="🕐 Recent Internships",
+                description=f"Showing {len(jobs)} most recently posted internship(s).",
+                color=discord.Color.purple()
             )
+
+            job_list = "\n\n".join([
+                bot.create_compact_job_text(job, i)
+                for i, job in enumerate(jobs, 1)
+            ])
+
+            embed.description += f"\n\n{job_list}"
+
+            # Add select menu
+            view = JobSelectView(bot.supabase, jobs, user_id)
+
+            await interaction.followup.send(embed=embed, view=view)
 
         except Exception as e:
             await interaction.followup.send(f"✗ Error: {e}")
@@ -294,7 +494,8 @@ def setup_commands(bot: InternshipBot):
 
             if not applications:
                 await interaction.followup.send(
-                    "You haven't marked any applications yet!\nUse the ✅ button on job postings to track your applications.",
+                    "You haven't marked any applications yet!\n"
+                    "Use `/internships` to browse jobs and mark them as applied.",
                     ephemeral=True
                 )
                 return
@@ -419,10 +620,12 @@ def setup_commands(bot: InternshipBot):
         try:
             await interaction.response.defer()
 
+            user_id = str(interaction.user.id)
+
             # Search in title, company, location, description
             response = bot.supabase.table('intern_jobs').select('*').or_(
                 f"title.ilike.%{keyword}%,company.ilike.%{keyword}%,location.ilike.%{keyword}%"
-            ).order('relevance_score', desc=True).limit(10).execute()
+            ).order('relevance_score', desc=True).limit(25).execute()
 
             jobs = response.data
 
@@ -430,12 +633,32 @@ def setup_commands(bot: InternshipBot):
                 await interaction.followup.send(f"No internships found matching '{keyword}'")
                 return
 
-            embeds = [bot.create_job_embed(job) for job in jobs[:10]]
-
-            await interaction.followup.send(
-                f"**Search results for '{keyword}':** ({len(jobs)} found)",
-                embeds=embeds
+            # Create compact list embed
+            embed = discord.Embed(
+                title=f"🔍 Search Results: '{keyword}'",
+                description=f"Found {len(jobs)} matching internship(s).",
+                color=discord.Color.green()
             )
+
+            job_list = "\n\n".join([
+                bot.create_compact_job_text(job, i)
+                for i, job in enumerate(jobs, 1)
+            ])
+
+            if len(job_list) > 4000:
+                job_list = "\n\n".join([
+                    bot.create_compact_job_text(job, i)
+                    for i, job in enumerate(jobs[:10], 1)
+                ])
+                embed.set_footer(text="Showing first 10 results")
+                jobs = jobs[:10]
+
+            embed.description += f"\n\n{job_list}"
+
+            # Add select menu
+            view = JobSelectView(bot.supabase, jobs, user_id)
+
+            await interaction.followup.send(embed=embed, view=view)
 
         except Exception as e:
             await interaction.followup.send(f"✗ Error: {e}")
