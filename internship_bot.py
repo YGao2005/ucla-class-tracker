@@ -121,7 +121,7 @@ class InternshipBot(commands.Bot):
             print(f"✗ Error marking job as posted: {e}")
 
     def create_job_embed(self, job: Dict) -> discord.Embed:
-        """Create a rich embed for a job posting"""
+        """Create a concise embed for a job posting (no description)"""
         score = job.get('relevance_score', 0)
         if score >= 15:
             color = discord.Color.green()
@@ -133,7 +133,6 @@ class InternshipBot(commands.Bot):
         embed = discord.Embed(
             title=job['title'],
             url=job['url'],
-            description=self._truncate_description(job.get('description', '')),
             color=color,
             timestamp=datetime.now()
         )
