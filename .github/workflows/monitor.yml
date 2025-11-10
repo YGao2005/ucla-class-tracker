@@ -11,6 +11,8 @@ on:
 jobs:
   check-classes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
     - name: Checkout repository
@@ -42,15 +44,14 @@ jobs:
         DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       run: python monitor.py
 
-    - name: Commit state changes
+    - name: Commit and push state changes
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         git add state.json
-        git diff --quiet && git diff --staged --quiet || git commit -m "Update class monitoring state [skip ci]"
-
-    - name: Push changes
-      uses: ad-m/github-push-action@master
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        branch: ${{ github.ref }}
+        if ! git diff --quiet --staged; then
+          git commit -m "Update class monitoring state [skip ci]"
+          git push
+        else
+          echo "No changes to commit"
+        fi
