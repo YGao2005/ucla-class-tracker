@@ -432,10 +432,44 @@ async def check_class_changes():
         for class_state in all_classes:
             class_key = class_state['class_key']
             current_status = class_state['status']
+            current_enrolled = class_state.get('enrolled', 0)
+            current_capacity = class_state.get('capacity', 0)
+            last_notified_enrolled = class_state.get('last_notified_enrolled')
 
-            # Check if class recently became available
+            # Determine if we should notify based on smart logic
+            should_notify = False
+            notify_reason = None
+
             if current_status in ['Open', 'Waitlist Available']:
-                # Get subscribers
+                # Case 1: First time seeing this class as Open (never notified before)
+                if last_notified_enrolled is None:
+                    should_notify = True
+                    notify_reason = f"Class opened (first detection)"
+                    print(f"📊 {class_key}: First time open - {current_enrolled}/{current_capacity}")
+
+                # Case 2: Spots opened up (enrollment decreased)
+                elif current_enrolled < last_notified_enrolled:
+                    spots_opened = last_notified_enrolled - current_enrolled
+                    should_notify = True
+                    notify_reason = f"{spots_opened} spot(s) opened"
+                    print(f"📊 {class_key}: Spots opened - {last_notified_enrolled} → {current_enrolled}")
+
+                # Case 3: No change - don't notify
+                elif current_enrolled == last_notified_enrolled:
+                    print(f"📊 {class_key}: No change ({current_enrolled}/{current_capacity}) - skipping notification")
+
+                # Case 4: Enrollment increased but still Open - don't notify
+                elif current_enrolled > last_notified_enrolled:
+                    print(f"📊 {class_key}: Enrollment increased {last_notified_enrolled} → {current_enrolled} - skipping notification")
+
+            else:
+                # Class is Closed/Full - clear last_notified so we can notify when it reopens
+                if last_notified_enrolled is not None:
+                    db.clear_last_notified(class_key)
+                    print(f"📊 {class_key}: Now {current_status} - cleared last_notified")
+
+            # Send notifications if we determined we should
+            if should_notify:
                 subscribers = db.get_subscribers_for_class(class_key)
 
                 if subscribers:
@@ -445,15 +479,15 @@ async def check_class_changes():
                     notification_time = to_pacific_time(None)
                     embed = discord.Embed(
                         title=f"🎉 Class Available: {subject} {course}",
-                        description=f"**Status:** {current_status}",
+                        description=f"**Status:** {current_status}\n*{notify_reason}*",
                         color=0x00ff00,
                         timestamp=now_pacific()
                     )
 
-                    if class_state['capacity'] > 0:
+                    if current_capacity > 0:
                         embed.add_field(
                             name="Enrollment",
-                            value=f"{class_state['enrolled']}/{class_state['capacity']}",
+                            value=f"{current_enrolled}/{current_capacity}",
                             inline=True
                         )
 
@@ -474,6 +508,10 @@ async def check_class_changes():
 
                         # Rate limit: small delay between DMs
                         await asyncio.sleep(1)
+
+                    # Update last_notified_enrolled after sending notifications
+                    db.update_last_notified(class_key, current_enrolled)
+                    print(f"📝 Updated last_notified for {class_key} to {current_enrolled}")
 
     except Exception as e:
         print(f"❌ Error in background task: {e}")

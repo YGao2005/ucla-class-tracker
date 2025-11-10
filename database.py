@@ -107,6 +107,51 @@ class Database:
             print(f"Error getting all class states: {e}")
             return []
 
+    def update_last_notified(self, class_key: str, enrolled: int) -> bool:
+        """
+        Update the last_notified_enrolled field to track when we sent notifications.
+        This prevents duplicate notifications when enrollment hasn't changed.
+
+        Args:
+            class_key: Format "SUBJECT_CATALOG" (e.g., "PSYCH_124G")
+            enrolled: Current enrollment count we're notifying about
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self.client.table('class_states')\
+                .update({'last_notified_enrolled': enrolled})\
+                .eq('class_key', class_key)\
+                .execute()
+
+            return True
+        except Exception as e:
+            print(f"Error updating last_notified for {class_key}: {e}")
+            return False
+
+    def clear_last_notified(self, class_key: str) -> bool:
+        """
+        Clear the last_notified_enrolled field when a class becomes full/closed.
+        This allows fresh notifications when it opens again.
+
+        Args:
+            class_key: Format "SUBJECT_CATALOG" (e.g., "PSYCH_124G")
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self.client.table('class_states')\
+                .update({'last_notified_enrolled': None})\
+                .eq('class_key', class_key)\
+                .execute()
+
+            return True
+        except Exception as e:
+            print(f"Error clearing last_notified for {class_key}: {e}")
+            return False
+
     def get_subscribed_classes(self) -> List[Dict]:
         """
         Get all classes that have at least one subscription.
