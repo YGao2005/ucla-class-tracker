@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks, commands
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import List, Dict, Optional
 import asyncio
 from supabase import Client
@@ -42,9 +42,9 @@ class InternshipBot(commands.Bot):
         print(f'  Announcement channel: {self.announcement_channel_id}')
         print('  Ready to track internships!')
 
-    @tasks.loop(hours=1)
+    @tasks.loop(time=time(hour=0, minute=30, second=0))  # 4:30 PM PST = 00:30 UTC (30 min after scraper at 00:00 UTC)
     async def check_new_internships(self):
-        """Check for new internships every hour and post them"""
+        """Check for new internships once daily at 4:30 PM PST (00:30 UTC) and post them"""
         try:
             if self.announcement_channel_id == 0:
                 return
@@ -57,6 +57,7 @@ class InternshipBot(commands.Bot):
             new_jobs = await self.get_unposted_jobs()
 
             if not new_jobs:
+                print("📭 No new internships posted today")
                 return
 
             print(f"📢 Found {len(new_jobs)} new internships to announce")
