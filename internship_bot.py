@@ -84,16 +84,19 @@ class InternshipBot(commands.Bot):
         await self.wait_until_ready()
 
     async def get_unposted_jobs(self, limit: int = 30) -> List[Dict]:
-        """Get jobs that haven't been posted to Discord yet"""
+        """Get jobs that haven't been posted to Discord yet - ONLY jobs posted today by companies"""
         try:
-            week_ago = (datetime.now() - timedelta(days=7)).date().isoformat()
+            # Get jobs posted TODAY by companies (not scraped today)
+            today = datetime.now().date().isoformat()
 
-            response = self.supabase.table('intern_jobs').select('*').gte(
-                'scraped_date', week_ago
-            ).order('scraped_date', desc=True).limit(limit).execute()
+            # Fetch jobs where posted_date is today
+            response = self.supabase.table('intern_jobs').select('*').eq(
+                'posted_date', today
+            ).order('relevance_score', desc=True).limit(limit).execute()
 
             all_jobs = response.data
 
+            # Filter out jobs already posted to Discord
             unposted_jobs = []
             for job in all_jobs:
                 posted_response = self.supabase.table('intern_posted_jobs').select(
